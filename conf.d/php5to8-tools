@@ -1,0 +1,28 @@
+#!/bin/bash -ex
+# php5to8-tools by Daniele Lolli (UncleDan) feat. Claude AI - Release 1.0 - 2026-11-10 16-01-58
+#
+# Install Rector (https://getrector.com/) and PHP_CodeSniffer + PHPCompatibility
+# into /opt/php5to8-tools via composer (composer is provided by composer.mk).
+# Wrappers: /usr/local/bin/rector, /usr/local/bin/phpcs, /usr/local/bin/phpcbf
+
+TOOLS=/opt/php5to8-tools
+
+export COMPOSER_ALLOW_SUPERUSER=1
+export COMPOSER_HOME=/tmp/composer-home
+export COMPOSER_NO_INTERACTION=1
+
+# GitHub token support, as in common/conf/composer (avoids API rate limits)
+if [[ -n "$GITHUB_USER_TOKEN" ]]; then
+    composer config -g github-oauth.github.com "$GITHUB_USER_TOKEN"
+fi
+
+composer --working-dir="$TOOLS" install --no-progress --prefer-dist
+composer --working-dir="$TOOLS" show | grep -E '^(rector|squizlabs|phpcompatibility)/'
+
+rm -rf "$COMPOSER_HOME"
+chown -R root:root "$TOOLS"
+
+/usr/local/bin/rector --version
+/usr/local/bin/phpcs -i | grep -q PHPCompatibility
+
+install -d -m 0700 /var/cache/tkl-php5to8 /var/backups/php5to8

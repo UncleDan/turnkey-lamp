@@ -1,5 +1,13 @@
 #!/bin/bash -e
-# Ensure Apache is running after the shared firstboot TLS certificate rotation.
+# 40lamp by Daniele Lolli (UncleDan) feat. Claude AI - Release 1.0 - 2026-11-10 16-01-58
+# Ensure PHP-FPM (5.6 & 8) and Apache are running after the shared firstboot
+# TLS certificate rotation.
 
+for unit in /lib/systemd/system/php*-fpm.service; do
+    [[ -e "$unit" ]] || continue
+    svc=$(basename "$unit")
+    systemctl restart "$svc"
+    systemctl --quiet is-active "$svc"
+done
 systemctl restart apache2.service
 systemctl --quiet is-active apache2.service

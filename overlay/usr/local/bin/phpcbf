@@ -1,0 +1,9 @@
+#!/bin/bash -e
+# phpcbf by Daniele Lolli (UncleDan) feat. Claude AI - Release 1.0 - 2026-11-10 16-01-58
+#
+# PHP Code Beautifier (phpcbf) with the PHPCompatibility standard (/opt/php5to8-tools).
+# Example: phpcs --standard=PHPCompatibility --runtime-set testVersion 7.0- DIR
+
+exec php -d short_open_tag=On -d memory_limit=2G \
+    -d error_reporting='E_ALL & ~E_DEPRECATED' \
+    /opt/php5to8-tools/vendor/bin/"$(basename "$0")" "$@"

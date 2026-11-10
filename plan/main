@@ -8,3 +8,35 @@ libdbd-mysql-perl        # A Perl5 database interface to the MySQL database
 
 php-xdebug
 php-pear
+
+/* PHP 8 (Debian default) - served via PHP-FPM */
+php-fpm
+php-mbstring
+php-gd
+php-xml
+php-curl
+php-intl
+php-zip
+php-bcmath
+php-soap
+
+/* PHP 5.6 (legacy - packages.sury.org, see PHP_VERSION in Makefile) */
+php5.6-fpm
+php5.6-cli
+php5.6-mysql
+php5.6-mbstring
+php5.6-gd
+php5.6-xml
+php5.6-curl
+php5.6-intl
+php5.6-zip
+php5.6-json
+php5.6-opcache
+php5.6-mcrypt
+php5.6-bcmath
+php5.6-soap
+
+/* PHP 5 -> 8 migration helpers (Rector & PHPCompatibility via composer) */
+rsync
+diffutils
+unzip

@@ -1,0 +1,305 @@
+#!/bin/bash -e
+# tkl-php5to8 by Daniele Lolli (UncleDan) feat. Claude AI - Release 1.0 - 2026-11-10 16-01-58
+#
+# Helper to upgrade a legacy PHP 5 application to PHP 8 with Rector.
+#   - legacy app:   /var/www/app-php5  -> https://<host>:5443  (PHP 5.6 FPM)
+#   - upgraded app: /var/www/app-php8  -> https://<host>:8443  (PHP 8 FPM)
+# Both apps use the same MariaDB database (same config files are copied).
+# The legacy app is never modified.
+
+[[ -z "$DEBUG" ]] || set -x
+
+APP5=${APP5:-/var/www/app-php5}
+APP8=${APP8:-/var/www/app-php8}
+REPORTS=${REPORTS:-/root/php5to8-reports}
+BACKUPS=/var/backups/php5to8
+SHARE=/usr/local/share/tkl-php5to8
+CACHE=/var/cache/tkl-php5to8
+EXTS=(php php5 phtml inc)
+PLACEHOLDER=TKL-PHP5TO8-PLACEHOLDER
+
+PHP5_V=5.6
+PHP8_V=$(find /etc/php -mindepth 1 -maxdepth 1 -name '8.*' -printf '%f\n' \
+            | sort -V | tail -n1)
+PHP5="php$PHP5_V"
+PHP8="php$PHP8_V"
+
+fatal() { echo "fatal: $*" >&2; exit 1; }
+warn() { echo "warning: $*" >&2; }
+info() { echo "== $*"; }
+
+usage() {
+    cat <<EOF
+Syntax: $(basename "$0") COMMAND [OPTIONS]
+
+Upgrade the legacy PHP 5 app ($APP5) to PHP $PHP8_V ($APP8) with Rector.
+
+Commands:
+    status              PHP/FPM/vhost status and DB connection charset of
+                        both PHP versions (asks for a MariaDB user/password)
+    check               analyse $APP5 (read only): PHPCompatibility report,
+                        PHP $PHP8_V lint, Rector dry run, known pitfalls
+    migrate             copy $APP5 to $APP8, fix short open tags, run
+                        Rector, lint with PHP $PHP8_V and write a report
+    diff                unified diff between $APP5 and $APP8
+
+Options (migrate):
+    --force             overwrite a non placeholder $APP8 (a tar.gz backup
+                        is always made in $BACKUPS first)
+    --share DIR         DIR (relative to the app root, e.g. 'uploads') is not
+                        copied: $APP8/DIR becomes a symlink to $APP5/DIR, so
+                        both versions see the same uploaded files. Repeatable.
+    --skip PATTERN      extra Rector skip pattern (e.g. '*/vendor/*'). Repeatable.
+    --no-short-tags     do not rewrite '<?' as '<?php'
+
+Options (status):
+    --user USER         MariaDB user for the charset check (default: root)
+
+Reports are written to $REPORTS/<timestamp>/
+EOF
+    exit "${1:-0}"
+}
+
+need_root() { [[ $EUID -eq 0 ]] || fatal "must be run as root"; }
+
+new_report_dir() {
+    REPORT="$REPORTS/$(date +%Y%m%d-%H%M%S)-$1"
+    install -d -m 0700 "$REPORT"
+    info "report dir: $REPORT"
+}
+
+# list source files (NUL separated) below $1
+php_files() {
+    local args=() e
+    for e in "${EXTS[@]}"; do args+=(-o -iname "*.$e"); done
+    find "$1" -type f \( "${args[@]:1}" \) -print0
+}
+
+is_placeholder() {
+    local dir=$1
+    [[ -z "$(ls -A "$dir" 2>/dev/null)" ]] && return 0
+    [[ "$(find "$dir" -mindepth 1 | wc -l)" -eq 1 ]] \
+        && grep -qs "$PLACEHOLDER" "$dir/index.php"
+}
+
+lint_tree() {
+    # $1 = php binary, $2 = dir, $3 = output file; returns number of failures
+    local bin=$1 dir=$2 out=$3
+    : > "$out"
+    # sh -c '... || true': a failing file must not stop xargs
+    php_files "$dir" | xargs -0 -r -n1 -P"$(nproc)" sh -c \
+        '"$0" -d short_open_tag=On -d display_errors=stdout -d log_errors=0 -l "$1" || true' \
+        "$bin" 2>&1 | grep -v '^No syntax errors detected' >> "$out" || true
+    grep -c '^Errors parsing' "$out" || true
+}
+
+pitfalls() {
+    # $1 = dir, $2 = output file
+    local dir=$1 out=$2
+    {
+        echo "# Known PHP 5 -> 8 pitfalls in $dir"
+        echo
+        echo "## mysql_* functions (removed in PHP 7.0, NOT converted by Rector)"
+        php_files "$dir" | xargs -0 -r grep -HnE '\bmysql_[a-z_]+\s*\(' || echo "none"
+        echo
+        echo "## php_value/php_flag in .htaccess (mod_php only: HTTP 500 under PHP-FPM)"
+        echo "## move them to a .user.ini file in the same directory"
+        find "$dir" -name .htaccess -print0 \
+            | xargs -0 -r grep -HnEi '^\s*php_(admin_)?(value|flag)' || echo "none"
+        echo
+        echo "## ereg/split/each/create_function/call-time pass-by-reference (Rector converts most)"
+        php_files "$dir" | xargs -0 -r grep -HnE '\b(eregi?(_replace)?|spliti?|each|create_function)\s*\(' || echo "none"
+        echo
+        echo "## mcrypt_* (extension removed in PHP 7.2)"
+        php_files "$dir" | xargs -0 -r grep -HnE '\bmcrypt_[a-z_]+\s*\(' || echo "none"
+        echo
+        echo "## short open tags '<?' (rewritten by 'migrate' unless --no-short-tags)"
+        php_files "$dir" | xargs -0 -r grep -lE '<\?($|[[:space:]])' || echo "none"
+    } > "$out"
+}
+
+fix_short_tags() {
+    # $1 = dir, $2 = list of changed files
+    local dir=$1 out=$2 f
+    : > "$out"
+    while IFS= read -r -d '' f; do
+        [[ -L "$f" ]] && continue
+        grep -q '<?' "$f" || continue
+        # only files that are valid PHP 5.6 with short tags on (a file with
+        # '<?xml' in its HTML would fail here and is left alone)
+        "$PHP5" -d short_open_tag=On -l "$f" >/dev/null 2>&1 || continue
+        php -d short_open_tag=On "$SHARE/fix-short-tags.php" "$f" >> "$out" || true
+    done < <(php_files "$dir")
+}
+
+write_rector_config() {
+    # $1 = target dir, $2 = config file, rest = extra skip patterns
+    local target=$1 conf=$2; shift 2
+    local set="php${PHP8_V/./}" skip="" p
+    for p in "$@"; do skip+="        '$p',"$'\n'; done
+    cat > "$conf" <<EOF
+<?php
+// Generated by tkl-php5to8 - only the PHP version upgrade sets are applied
+// (no code quality/style sets) so the application behaves and looks the same.
+// Docs: https://getrector.com/documentation
+declare(strict_types=1);
+
+use Rector\Config\RectorConfig;
+
+return RectorConfig::configure()
+    ->withPaths(['$target'])
+    ->withFileExtensions(['php', 'php5', 'phtml', 'inc'])
+    ->withSkip([
+        '*/node_modules/*',
+$skip    ])
+    ->withCache('$CACHE/rector')
+    ->withPhpSets($set: true);
+EOF
+}
+
+cmd_status() {
+    local user=root pass
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --user) user=$2; shift 2;;
+            *) usage 1;;
+        esac
+    done
+    info "PHP versions"
+    "$PHP5" -r 'echo "PHP 5: ", PHP_VERSION, PHP_EOL;'
+    "$PHP8" -r 'echo "PHP 8: ", PHP_VERSION, PHP_EOL;'
+    echo "default php CLI: $(php -r 'echo PHP_VERSION;')"
+    echo "rector: $(rector --version 2>/dev/null || echo 'not found')"
+    info "services"
+    for s in apache2 mariadb "$PHP5-fpm" "$PHP8-fpm"; do
+        printf '%-14s %s\n' "$s" "$(systemctl is-active "$s" || true)"
+    done
+    info "vhosts"
+    for p in 5443:app-php5 8443:app-php8; do
+        printf 'https://127.0.0.1:%-5s %-9s HTTP %s\n' "${p%%:*}" "${p##*:}" \
+            "$(curl -ks -o /dev/null -w '%{http_code}' "https://127.0.0.1:${p%%:*}/")"
+    done
+    info "DB connection charset seen by each PHP version (user: $user)"
+    read -rsp "MariaDB password for $user: " pass; echo
+    local code='$m = @new mysqli("localhost", getenv("DBU"), getenv("DBP"));
+        if ($m->connect_error) { echo "connect failed: ", $m->connect_error, PHP_EOL; exit(1); }
+        $r = $m->query("SELECT @@character_set_client, @@character_set_connection, @@character_set_results, @@collation_connection")->fetch_row();
+        printf("PHP %-8s client=%s connection=%s results=%s collation=%s (mysqli default: %s)\n",
+            PHP_VERSION, $r[0], $r[1], $r[2], $r[3], $m->character_set_name());'
+    DBU=$user DBP=$pass "$PHP5" -r "$code" || true
+    DBU=$user DBP=$pass "$PHP8" -r "$code" || true
+    echo "If the two lines differ and the app does not call set_charset()/SET NAMES,"
+    echo "see /etc/mysql/mariadb.conf.d/90-php5to8.cnf"
+}
+
+cmd_check() {
+    need_root
+    [[ $# -eq 0 ]] || usage 1
+    is_placeholder "$APP5" && fatal "$APP5 only holds the placeholder - copy the legacy app there first"
+    new_report_dir check
+    info "PHP $PHP5_V lint (sanity check of the legacy code)"
+    echo "files failing on PHP $PHP5_V: $(lint_tree "$PHP5" "$APP5" "$REPORT/lint-php5.txt")"
+    info "PHP $PHP8_V lint of the unmodified legacy code"
+    echo "files failing on PHP $PHP8_V: $(lint_tree "$PHP8" "$APP5" "$REPORT/lint-php8-before.txt")"
+    info "PHPCompatibility (testVersion 7.0-)"
+    phpcs -p -s --standard=PHPCompatibility --runtime-set testVersion 7.0- \
+        --extensions="$(IFS=,; echo "${EXTS[*]}")" \
+        --report-full="$REPORT/phpcompatibility.txt" \
+        --report-summary="$REPORT/phpcompatibility-summary.txt" \
+        "$APP5" >/dev/null || true
+    cat "$REPORT/phpcompatibility-summary.txt" 2>/dev/null || true
+    info "known pitfalls"
+    pitfalls "$APP5" "$REPORT/pitfalls.md"
+    echo "see $REPORT/pitfalls.md"
+    info "Rector dry run (on a temporary copy)"
+    local tmp; tmp=$(mktemp -d)
+    rsync -a "$APP5/" "$tmp/"
+    fix_short_tags "$tmp" /dev/null
+    write_rector_config "$tmp" "$REPORT/rector.php"
+    rector process --config "$REPORT/rector.php" --dry-run --no-progress-bar \
+        > "$REPORT/rector-dry-run.txt" 2>&1 || true
+    tail -n 5 "$REPORT/rector-dry-run.txt"
+    rm -rf "$tmp"
+    info "done - see $REPORT"
+}
+
+cmd_migrate() {
+    need_root
+    local force="" short_tags=y shares=() skips=() d
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --force) force=y; shift;;
+            --share) shares+=("${2%/}"); shift 2;;
+            --skip) skips+=("$2"); shift 2;;
+            --no-short-tags) short_tags=""; shift;;
+            -h|--help) usage;;
+            *) usage 1;;
+        esac
+    done
+    is_placeholder "$APP5" && fatal "$APP5 only holds the placeholder - copy the legacy app there first"
+    if ! is_placeholder "$APP8" && [[ -z "$force" ]]; then
+        fatal "$APP8 already holds an app (manual fixes?) - use --force to overwrite (a backup is made)"
+    fi
+    new_report_dir migrate
+    install -d -m 0700 "$BACKUPS"
+    if ! is_placeholder "$APP8"; then
+        info "backup of $APP8"
+        tar -C "$(dirname "$APP8")" -czf "$BACKUPS/app-php8-$(date +%Y%m%d-%H%M%S).tar.gz" \
+            "$(basename "$APP8")"
+    fi
+
+    info "copy $APP5 -> $APP8 (ownership and permissions preserved)"
+    local excludes=()
+    for d in "${shares[@]}"; do excludes+=(--exclude "/$d"); done
+    rsync -a --delete "${excludes[@]}" "$APP5/" "$APP8/"
+    for d in "${shares[@]}"; do
+        [[ -e "$APP5/$d" ]] || { warn "--share $d: $APP5/$d does not exist"; continue; }
+        rm -rf "${APP8:?}/$d"
+        ln -s "$APP5/$d" "$APP8/$d"
+        echo "shared: $APP8/$d -> $APP5/$d"
+        skips+=("$APP8/$d")
+    done
+
+    if [[ -n "$short_tags" ]]; then
+        info "short open tags '<?' -> '<?php'"
+        fix_short_tags "$APP8" "$REPORT/short-tags.txt"
+        echo "files changed: $(wc -l < "$REPORT/short-tags.txt")"
+    fi
+
+    info "Rector (PHP $PHP8_V upgrade sets)"
+    write_rector_config "$APP8" "$REPORT/rector.php" "${skips[@]}"
+    rector process --config "$REPORT/rector.php" --no-progress-bar \
+        > "$REPORT/rector.txt" 2>&1 || warn "rector reported errors - see $REPORT/rector.txt"
+    tail -n 5 "$REPORT/rector.txt"
+
+    info "PHP $PHP8_V lint of the upgraded code"
+    echo "files failing on PHP $PHP8_V: $(lint_tree "$PHP8" "$APP8" "$REPORT/lint-php8-after.txt")"
+    info "remaining known pitfalls"
+    pitfalls "$APP8" "$REPORT/pitfalls.md"
+    diff -ruN --no-dereference "$APP5" "$APP8" > "$REPORT/changes.diff" || true
+    echo "diff: $REPORT/changes.diff ($(grep -c '^+++ ' "$REPORT/changes.diff" || true) files)"
+
+    systemctl reload "$PHP8-fpm" || true
+    cat <<EOF
+
+Done. Compare the two versions page by page:
+    legacy:   https://<host>:5443/   (log: /var/log/php/app-php5.error.log)
+    upgraded: https://<host>:8443/   (log: /var/log/php/app-php8.error.log)
+Fix what is left in $APP8 (see $REPORT/pitfalls.md and the PHP 8 error log).
+EOF
+}
+
+cmd_diff() {
+    [[ $# -eq 0 ]] || usage 1
+    diff -ruN --no-dereference "$APP5" "$APP8" || true
+}
+
+[[ -n "$PHP8_V" ]] || fatal "PHP 8 not found in /etc/php"
+case "$1" in
+    status) shift; cmd_status "$@";;
+    check) shift; cmd_check "$@";;
+    migrate) shift; cmd_migrate "$@";;
+    diff) shift; cmd_diff "$@";;
+    -h|--help|help) usage;;
+    *) usage 1;;
+esac

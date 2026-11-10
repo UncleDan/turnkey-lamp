@@ -1,3 +1,24 @@
+turnkey-lamp-php5to8-beta-19.0 (1) turnkey; urgency=low
+
+  * Personal beta variant of TurnKey LAMP v19.0 for PHP 5 -> PHP 8 upgrades.
+
+  * PHP 5.6 from packages.sury.org (PHP_VERSION=5.6, pinned) side by side with
+    Debian's PHP 8.
+
+  * Apache: mod_php/prefork replaced by PHP-FPM/event (+ mod_cgid, HTTP/2).
+
+  * New vhosts: app-php5 (port 5443, PHP 5.6) and app-php8 (port 8443, PHP 8),
+    own FPM pools, logs and session dirs; same MariaDB database.
+
+  * Rector, PHP_CodeSniffer and PHPCompatibility in /opt/php5to8-tools; new
+    'tkl-php5to8' helper (status, check, migrate, diff).
+
+  * MariaDB: commented 90-php5to8.cnf to align the connection charset.
+
+  * Updated landing page, firstboot hook 40lamp and tests.
+
+ -- Daniele Lolli (UncleDan) <uncledan@users.noreply.github.com>  Tue, 10 Nov 2026 16:01:58 +0100
+
 turnkey-lamp-19.0 (1) turnkey; urgency=low
 
   * Upgraded base distribution to Debian 13.x/Trixie.

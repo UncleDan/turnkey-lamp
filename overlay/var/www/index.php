@@ -1,5 +1,6 @@
 <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
 
+<?php $app_host = htmlspecialchars(preg_replace('/:\d+$/', '', $_SERVER['HTTP_HOST'])); ?>
 <html lang="en">
     <head>
         <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
@@ -44,6 +45,21 @@
                     <div></div>
                     <div></div>
                     <div></div>
+
+                    <h2>Applications (same database)</h2>
+                    <ul>
+                        <li>
+                          <a href="https://<?php print
+                          $app_host; ?>:5443/">Legacy app - PHP 5.6</a>
+                          (/var/www/app-php5)
+                        </li>
+                        <li>
+                          <a href="https://<?php print
+                          $app_host; ?>:8443/">Upgraded app - PHP <?php
+                          print PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION; ?></a>
+                          (/var/www/app-php8 - created by: tkl-php5to8 migrate)
+                        </li>
+                    </ul>
 
                     <h2>Resources and references</h2>
                     <ul>

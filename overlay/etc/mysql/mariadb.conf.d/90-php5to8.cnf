@@ -1,0 +1,23 @@
+# 90-php5to8.cnf - same database for the PHP 5.6 and the PHP 8 app
+#
+# Legacy apps that never call mysqli_set_charset()/SET NAMES get the
+# connection charset that the client library proposes, and PHP 5.6 and PHP 8
+# may not propose the same one: accented text can then look different on the
+# two versions (and new rows can be stored in a different encoding).
+# Check with:  tkl-php5to8 status
+#
+# If the two PHP versions report a different charset, force the one the legacy
+# app has always used for every client - uncomment and set it (latin1 shown is
+# the classic MySQL 5.x default), then: systemctl restart mariadb
+#
+# Docs: https://mariadb.com/kb/en/server-system-variables/#character_set_server
+
+[mysqld]
+#character-set-client-handshake = OFF
+#character-set-server           = latin1
+#collation-server               = latin1_swedish_ci
+#
+# PHP 5.6 mysqlnd does not know the newer utf8mb4_uca1400_* collations; if it
+# fails with "Server sent charset (...) unknown to the client" use instead:
+#character-set-server           = utf8mb4
+#collation-server               = utf8mb4_general_ci
